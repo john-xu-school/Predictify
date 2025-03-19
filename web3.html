@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NewsOracle - Predict Daily Events</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
+    <style>
+        .prediction-card {
+            transition: all 0.3s ease;
+        }
+        .prediction-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        }
+        .gradient-bg {
+            background: linear-gradient(90deg, #4F46E5 0%, #7C3AED 100%);
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <header class="gradient-bg text-white p-6">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-3xl font-bold">NewsOracle</h1>
+            <div class="flex items-center space-x-4">
+                <span id="network" class="px-3 py-1 bg-purple-700 rounded-full text-sm"></span>
+                <button id="connect-wallet" class="px-4 py-2 bg-white text-purple-700 rounded-lg font-medium hover:bg-gray-100">Connect Wallet</button>
+                <div id="wallet-info" class="hidden px-4 py-2 bg-purple-800 rounded-lg font-medium">
+                    <span id="wallet-address"></span>
+                </div>
+            </div>
+        </div>
+    </header>
+    
+    <main class="container mx-auto p-6">
+        <!-- User dashboard -->
+        <div id="dashboard" class="hidden">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div class="bg-white p-6 rounded-lg shadow">
+                    <h3 class="text-xl font-semibold mb-2">Your Balance</h3>
+                    <p class="text-3xl font-bold" id="user-balance">0 ETH</p>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow">
+                    <h3 class="text-xl font-semibold mb-2">Active Predictions</h3>
+                    <p class="text-3xl font-bold" id="active-predictions">0</p>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow">
+                    <h3 class="text-xl font-semibold mb-2">Success Rate</h3>
+                    <p class="text-3xl font-bold" id="success-rate">0%</p>
+                </div>
+            </div>
+
+            <!-- Add new prediction -->
+            <div class="bg-white p-6 rounded-lg shadow mb-8">
+                <h2 class="text-2xl font-bold mb-4">Make a Prediction</h2>
+                <form id="prediction-form" class="space-y-4">
+                    <div>
+                        <label class="block text-gray-700 mb-2">Prediction Title</label>
+                        <input type="text" id="prediction-title" class="w-full px-4 py-2 border rounded-lg" placeholder="E.g., 'Stock market will rise tomorrow'">
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 mb-2">Prediction Details</label>
+                        <textarea id="prediction-details" rows="3" class="w-full px-4 py-2 border rounded-lg" placeholder="Describe your prediction in detail..."></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 mb-2">News Keywords (for verification)</label>
+                        <input type="text" id="prediction-keywords" class="w-full px-4 py-2 border rounded-lg" placeholder="Enter keywords separated by commas">
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 mb-2">Expiry Date</label>
+                        <input type="date" id="prediction-expiry" class="w-full px-4 py-2 border rounded-lg">
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 mb-2">Stake Amount (ETH)</label>
+                        <input type="number" id="prediction-stake" min="0.001" step="0.001" class="w-full px-4 py-2 border rounded-lg" placeholder="0.1">
+                    </div>
+                    <button type="submit" class="w-full px-6 py-3 gradient-bg text-white rounded-lg font-medium hover:opacity-90">Submit Prediction</button>
+                </form>
+            </div>
+
+            <!-- Predictions list -->
+            <h2 class="text-2xl font-bold mb-4">Your Predictions</h2>
+            <div id="predictions-list" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Predictions will be added here dynamically -->
+            </div>
+        </div>
+
+        <!-- Connect wallet prompt -->
+        <div id="connect-prompt" class="flex flex-col items-center justify-center py-12">
+            <div class="text-center mb-8">
+                <h2 class="text-3xl font-bold mb-4">Predict Daily News Events</h2>
+                <p class="text-lg text-gray-600 max-w-lg mx-auto">Make predictions about upcoming news events, stake ETH, and earn rewards for accurate predictions!</p>
+            </div>
+            <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full text-center">
+                <img src="/api/placeholder/100/100" alt="MetaMask logo" class="mx-auto mb-6">
+                <h3 class="text-xl font-semibold mb-4">Connect Your Wallet</h3>
+                <p class="text-gray-600 mb-6">Please connect your MetaMask wallet to start making predictions and earning rewards.</p>
+                <button id="connect-wallet-prompt" class="px-6 py-3 gradient-bg text-white rounded-lg font-medium hover:opacity-90 w-full">Connect MetaMask</button>
+            </div>
+        </div>
+    </main>
+
+    <footer class="bg-gray-800 text-white p-6">
+        <div class="container mx-auto">
+            <p class="text-center">&copy; 2025 NewsOracle - Predict Daily Events</p>
+        </div>
+    </footer>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/web3/1.8.1/web3.min.js"></script>
+    <script src="ethers.min.js" type="application/javascript"></script>
+    <script src="app.js"></script>
+</body>
+</html>

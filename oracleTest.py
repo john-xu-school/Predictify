@@ -71,7 +71,11 @@ class PredictionVerifier:
         
         print(f"Total prediction count: {prediction_count}")
         
+<<<<<<< HEAD
         current_timestamp = int(datetime.now().timestamp())  # Add one day (24 * 60 * 60 seconds)
+=======
+        current_timestamp = int(datetime.now().timestamp()) + 86400  # Add one day (24 * 60 * 60 seconds)
+>>>>>>> origin/main
         
         for pred_id in range(1, prediction_count + 1):
             try:

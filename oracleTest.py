@@ -1,784 +1,373 @@
-# oracle_backend.py - Backend service for verifying predictions against news
-
 import os
 import time
 import json
-import logging
 import schedule
 import requests
+import torch
+import numpy as np
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+from transformers import AutoTokenizer, AutoModel, pipeline
+from bs4 import BeautifulSoup
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
-
-import nltk
-
-nltk.download('punkt_tab')
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("oracle.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("NewsOracle")
-
-# Download NLTK resources (run once)
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords')
-try:
-    nltk.data.find('corpora/wordnet')
-except LookupError:
-    nltk.download('wordnet')
+# Environment variables
+CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS')
+ORACLE_PRIVATE_KEY = os.getenv('OWNER_PRIVATE_KEY')
+WEB3_PROVIDER_URL = os.getenv('WEB3_PROVIDER_URL')
+NEWS_API_KEY = os.getenv('NEWS_API_KEY')
+VERIFICATION_THRESHOLD = float(os.getenv('VERIFICATION_THRESHOLD', '0.75'))  # Similarity threshold
 
 # Initialize Web3
-def initialize_web3():
-    # Get provider URL from environment
-    provider_url = os.getenv("WEB3_PROVIDER_URL")
-    if not provider_url:
-        raise ValueError("WEB3_PROVIDER_URL environment variable not set")
-    
-    logger.info(f"Connecting to provider URL: {provider_url}")
-    
-    # Initialize Web3 with provider
-    w3 = Web3(Web3.HTTPProvider(provider_url))
-    
-    # Check connection
-    if not w3.is_connected():
-        raise ConnectionError(f"Failed to connect to Web3 provider at {provider_url}")
-    
-    # Get network details
-    chain_id = w3.eth.chain_id
-    try:
-        block = w3.eth.get_block('latest')
-        logger.info(f"Connected to network:")
-        logger.info(f"  Chain ID: {chain_id}")
-        logger.info(f"  Latest block: {block.number}")
-        logger.info(f"  Network URL: {provider_url}")
-    except Exception as e:
-        logger.error(f"Error getting network details: {e}")
-    
-    return w3
+w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER_URL))
+w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)  # For compatibility with PoA networks like BSC
 
-# Load contract
-def load_contract(w3):
-    try:
-        # Get contract address and ABI from environment
-        contract_address = os.getenv("CONTRACT_ADDRESS")
-        abi_file = os.getenv("CONTRACT_ABI_FILE", "PredictifyContract.json")
-        
-        if not contract_address:
-            raise ValueError("CONTRACT_ADDRESS environment variable not set")
-            
-        # Ensure contract address is checksummed
-        contract_address = Web3.to_checksum_address(contract_address)
-        
-        # Load ABI from file
-        try:
-            with open(abi_file, 'r') as f:
-                contract_abi = json.load(f)
-                logger.info(f"Loaded ABI from {abi_file}")
-                logger.info(f"ABI contains {len(contract_abi)} entries")
-        except Exception as e:
-            raise ValueError(f"Failed to load contract ABI from {abi_file}: {e}")
-        
-        # Verify contract exists at address
-        code = w3.eth.get_code(contract_address)
-        if code == b'' or code == '0x' or code == b'0x':
-            raise ValueError(f"No contract code found at address {contract_address}")
-            
-        # Create contract instance
-        contract = w3.eth.contract(address=contract_address, abi=contract_abi)
-        
-        # Try to call a view function to verify contract is accessible
-        try:
-            prediction_count = contract.functions.prediction_count().call()
-            logger.info(f"Successfully connected to contract. Current prediction count: {prediction_count}")
-        except Exception as e:
-            logger.error(f"Failed to call contract function: {e}")
-            raise ValueError(f"Contract initialization failed: {e}")
-        
-        logger.info(f"Contract loaded successfully at address: {contract_address}")
-        return contract
-        
-    except Exception as e:
-        logger.error(f"Failed to load contract: {e}")
-        logger.error(f"Contract address: {contract_address}")
-        logger.error(f"ABI file: {abi_file}")
-        raise
-
-# Class for news verification
-class NewsVerifier:
-    def __init__(self, w3, contract):
-        self.w3 = w3
-        self.contract = contract
-        self.oracle_address = os.getenv("ORACLE_ADDRESS")
-        self.oracle_private_key = os.getenv("ORACLE_PRIVATE_KEY")
-        
-        if not self.oracle_address or not self.oracle_private_key:
-            raise ValueError("ORACLE_ADDRESS and ORACLE_PRIVATE_KEY must be set")
-        
-        # News API key
-        self.news_api_key = os.getenv("NEWS_API_KEY")
-        
-        # Initialize NLP components
-        self.stop_words = set(stopwords.words('english'))
-        self.lemmatizer = WordNetLemmatizer()
+# Load contract ABI
+with open('n/PredictifyContract.json', 'r') as f:
+    contract_abi = json.load(f)
     
-    def check_pending_predictions(self):
-        """Check for predictions that need verification"""
-        logger.info("Checking for pending predictions...")
-        
-        try:
-            # Get total prediction count
-            
-            prediction_count = self.contract.functions.prediction_count().call()
-            logger.info(f"Total predictions: {prediction_count}")
-            
-            # Check all predictions
-            for i in range(prediction_count):
-                # Get prediction details
-                prediction = self.contract.functions.get_prediction_details(i+1).call()
-                logger.info(f"Prediction details: {prediction}")
-                
-                # Extract prediction data
-                predictor = prediction[0]
-                prediction_text = prediction[1]
-                logger.info(f"Prediction text: {prediction_text}")
-                keywords = prediction[2]
-                expiry_timestamp = prediction[3]
-                is_verified = prediction[5]
-                
-                # Convert timestamp to datetime
-                expiry_date = datetime.fromtimestamp(expiry_timestamp)
-                now = datetime.now()
-                
-                logger.info(is_verified)
-                logger.info(now)
-                logger.info(expiry_date)
-                
-                # Check if prediction is expired but not verified
-                if not is_verified and now < expiry_date:
-                    logger.info(f"Processing prediction #{i+1}: {prediction_text[:50]}...")
-                    self.verify_prediction(i+1, prediction_text, keywords)
-        
-        except Exception as e:
-            logger.error(f"Error checking predictions: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+print(CONTRACT_ADDRESS)
+contract_address = Web3.to_checksum_address(CONTRACT_ADDRESS)
 
-    def submit_verification_with_retry(self, prediction_id, is_correct, evidence, max_retries=3):
-        """Submit verification with retries"""
-        last_error = None
-        for attempt in range(max_retries):
+# Initialize contract
+code = w3.eth.get_code(contract_address)
+if code == b'' or code == '0x' or code == b'0x':
+    raise ValueError(f"No contract code found at address {contract_address}")
+    
+# Create contract instance
+contract = w3.eth.contract(address=contract_address, abi=contract_abi)
+print(contract_address)
+
+# Set up oracle account
+oracle_account = w3.eth.account.from_key(ORACLE_PRIVATE_KEY)
+oracle_address = oracle_account.address
+
+# Initialize NLP models
+tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+model = AutoModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+zero_shot_classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+
+class PredictionVerifier:
+    def __init__(self):
+        print(f"Initializing PredictionVerifier as {oracle_address}")
+        
+        # # Verify we are the oracle
+        contract_oracle = contract.functions.oracle_address().call()
+        if contract_oracle.lower() != oracle_address.lower():
+            raise Exception(f"Oracle address mismatch: {contract_oracle} != {oracle_address}")
+            
+        #print(f"Connected to contract at {CONTRACT_ADDRESS}")
+        print(f"Current oracle address: {contract_oracle}")
+    
+    def get_pending_predictions(self):
+        """Get all predictions that have expired but not been verified"""
+        print("Getting pending predictions...")
+        prediction_count = contract.functions.prediction_count().call()
+        pending_predictions = []
+        
+        print(f"Total prediction count: {prediction_count}")
+        
+        current_timestamp = int(datetime.now().timestamp()) + 86400  # Add one day (24 * 60 * 60 seconds)
+        
+        for pred_id in range(1, prediction_count + 1):
             try:
-                logger.info(f"Attempt {attempt + 1} of {max_retries}")
-                return self.submit_verification(prediction_id, is_correct, evidence)
-            except Exception as e:
-                last_error = e
-                if "is not in the chain after" in str(e):
-                    logger.warning(f"Transaction timeout on attempt {attempt + 1}, retrying...")
-                    time.sleep(30)  # Wait 30 seconds before retry
-                else:
-                    # For other errors, don't retry
-                    raise
-        
-        # If we get here, all retries failed
-        logger.error(f"All {max_retries} attempts failed")
-        raise last_error
-
-    def verify_prediction(self, prediction_id, prediction_text, keywords):
-        """Verify a prediction against news sources and handle rewards"""
-        try:
-            logger.info(f"Starting verification for prediction #{prediction_id}")
-            
-            # Get prediction details first to check current state
-            prediction = self.contract.functions.get_prediction_details(prediction_id).call()
-            predictor_address = prediction[0]
-            prediction_text = prediction[1]
-            keywords = prediction[2]
-            expiry_timestamp = prediction[3]
-            stake_amount = prediction[4]
-            is_verified = prediction[5]
-            
-            # Check if prediction can be verified
-            current_time = datetime.now().timestamp()
-            # if current_time <= expiry_timestamp:
-            #     logger.warning(f"Prediction #{prediction_id} has not expired yet. Current time: {current_time}, Expiry: {expiry_timestamp}")
-            #     return
-            
-            if is_verified:
-                logger.info(f"Prediction #{prediction_id} is already verified")
-                return
-            
-            # Parse keywords and clean them
-            keyword_list = [k.strip() for k in keywords.split(',') if k.strip()]
-            if not keyword_list:
-                logger.warning(f"No valid keywords found for prediction #{prediction_id}")
-                return
+                pred_details = contract.functions.get_prediction_details(pred_id).call()
+                # Unpack prediction details
+                predictor, text, keywords, expiry_timestamp, stake_amount, is_verified, is_correct, evidence, is_claimed = pred_details
                 
-            logger.info(f"Processed keywords: {keyword_list}")
-            
-            # Get news articles related to keywords
-            articles = self.fetch_news(keyword_list)
-            
-            if not articles:
-                logger.warning(f"No articles found for prediction #{prediction_id}")
-                # If no articles found, mark as incorrect
-                is_correct = False
-                evidence = "No matching news articles found within the verification period."
-            else:
-                logger.info(f"Found {len(articles)} articles to analyze")
-                
-                # Process prediction text
-                processed_prediction = self.process_text(prediction_text)
-                if not processed_prediction:
-                    logger.warning(f"No valid text to process in prediction #{prediction_id}")
-                    is_correct = False
-                    evidence = "Invalid prediction text format."
-                else:
-                    # Check if prediction matches any news
-                    is_correct, evidence = self.match_prediction_to_news(processed_prediction, articles)
-            
-            logger.info(f"Prediction #{prediction_id} verified: {'Correct' if is_correct else 'Incorrect'}")
-            logger.info(f"Evidence: {evidence[:100]}...")
-            
-            # Submit verification to blockchain
-            verification_success = self.submit_verification_with_retry(prediction_id, is_correct, evidence)
-            
-            # Only attempt to claim reward if verification was successful and prediction was correct
-            if verification_success and is_correct:
-                logger.info(f"Prediction #{prediction_id} is correct. Attempting to claim reward...")
-                try:
-                    # Wait for the verification transaction to be fully confirmed
-                    time.sleep(15)  # Wait 15 seconds for verification to be confirmed
-                    self.claim_reward_for_user(prediction_id, predictor_address, stake_amount)
-                except Exception as e:
-                    logger.error(f"Failed to claim reward for prediction #{prediction_id}: {e}")
-            
-        except Exception as e:
-            logger.error(f"Error verifying prediction #{prediction_id}: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-    def claim_reward_for_user(self, prediction_id, predictor_address, stake_amount):
-        """Helper method to claim reward for a correct prediction"""
-        try:
-            # Double check prediction state before claiming
-            prediction = self.contract.functions.get_prediction_details(prediction_id).call()
-            is_verified = prediction[5]
-            is_correct = prediction[6]
-            is_claimed = prediction[8]
-            
-            if not is_verified:
-                logger.warning(f"Cannot claim reward for prediction #{prediction_id}: not verified yet")
-                return
-                
-            if not is_correct:
-                logger.warning(f"Cannot claim reward for prediction #{prediction_id}: prediction was incorrect")
-                return
-                
-            if is_claimed:
-                logger.warning(f"Reward for prediction #{prediction_id} has already been claimed")
-                return
-            
-            logger.info(f"Claiming reward for prediction #{prediction_id}")
-            
-            # Get nonce
-            nonce = self.w3.eth.get_transaction_count(self.oracle_address)
-            
-            # Get gas price
-            if hasattr(self.w3.eth, 'max_priority_fee'):
-                # EIP-1559 transaction
-                base_fee = self.w3.eth.get_block('latest').baseFeePerGas
-                priority_fee = self.w3.eth.max_priority_fee
-                max_fee_per_gas = base_fee * 2 + priority_fee
-                
-                # Build transaction
-                tx = self.contract.functions.claim_reward(prediction_id).build_transaction({
-                    'from': predictor_address,  # Important: use predictor's address
-                    'nonce': nonce,
-                    'gas': 300000,
-                    'maxFeePerGas': max_fee_per_gas,
-                    'maxPriorityFeePerGas': priority_fee,
-                    'chainId': self.w3.eth.chain_id,
-                    'type': 2
-                })
-            else:
-                # Legacy transaction
-                gas_price = self.w3.eth.gas_price
-                gas_price = int(gas_price * 1.2)  # Add 20% to gas price
-                
-                tx = self.contract.functions.claim_reward(prediction_id).build_transaction({
-                    'from': predictor_address,  # Important: use predictor's address
-                    'nonce': nonce,
-                    'gas': 300000,
-                    'gasPrice': gas_price,
-                    'chainId': self.w3.eth.chain_id
-                })
-            
-            logger.info(f"Claim reward transaction built: {tx}")
-            
-            # Sign and send transaction
-            signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=self.oracle_private_key)
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            
-            logger.info(f"Claim reward transaction sent: {tx_hash.hex()}")
-            
-            # Wait for receipt
-            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
-            
-            if receipt['status'] == 1:
-                logger.info(f"Successfully claimed reward for prediction #{prediction_id}")
-                logger.info(f"Transaction hash: {tx_hash.hex()}")
-            else:
-                logger.error(f"Failed to claim reward: {receipt}")
-                # If claiming fails, try sending ETH directly
-                self.send_reward_directly(predictor_address, stake_amount)
-                
-        except Exception as e:
-            logger.error(f"Error claiming reward: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            # If contract interaction fails, try sending ETH directly
-            self.send_reward_directly(predictor_address, stake_amount)
-
-    def send_reward_directly(self, recipient_address, stake_amount):
-        """Send reward directly to the user's address if contract claim fails"""
-        try:
-            logger.info(f"Attempting to send reward directly to {recipient_address}")
-            
-            # Calculate reward amount (stake amount plus small bonus)
-            reward_amount = stake_amount + self.w3.to_wei(0.001, 'ether')  # Add 0.001 ETH bonus
-            
-            # Get nonce
-            nonce = self.w3.eth.get_transaction_count(self.oracle_address)
-            
-            # Prepare transaction
-            tx = {
-                'nonce': nonce,
-                'to': recipient_address,
-                'value': reward_amount,
-                'gas': 21000,  # Standard gas limit for ETH transfers
-                'gasPrice': self.w3.eth.gas_price,
-                'chainId': self.w3.eth.chain_id
-            }
-            
-            # Sign and send transaction
-            signed_tx = self.w3.eth.account.sign_transaction(tx, self.oracle_private_key)
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            
-            logger.info(f"Direct reward transaction sent: {tx_hash.hex()}")
-            
-            # Wait for receipt
-            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
-            
-            if receipt['status'] == 1:
-                logger.info(f"Successfully sent reward directly to {recipient_address}")
-                logger.info(f"Transaction hash: {tx_hash.hex()}")
-            else:
-                logger.error(f"Failed to send direct reward: {receipt}")
-                
-        except Exception as e:
-            logger.error(f"Error sending direct reward: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-    def fetch_news(self, keywords):
-        """Fetch news articles related to keywords"""
-        articles = []
-        
-        # Use News API if key is available
-        if self.news_api_key:
-            articles.extend(self.fetch_from_news_api(keywords))
-        
-        # Web scraping from major news sources
-        articles.extend(self.scrape_news_websites(keywords))
-        
-        return articles
-    
-    def fetch_from_news_api(self, keywords):
-        """Fetch news from News API"""
-        try:
-            if not keywords:
-                logger.warning("No keywords provided for News API search")
-                return []
-
-            # Prepare query - use AND instead of OR to make the search more specific
-            query = " AND ".join(f'"{keyword.strip()}"' for keyword in keywords if keyword.strip())
-            
-            if not query:
-                logger.warning("No valid keywords after processing")
-                return []
-                
-            logger.info(f"Searching News API with query: {query}")
-            
-            # Set date range (last 24 hours)
-            from_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-            to_date = datetime.now().strftime('%Y-%m-%d')
-            
-            # Make API request
-            url = "https://newsapi.org/v2/everything"
-            params = {
-                "q": query,
-                "from": from_date,
-                "to": to_date,
-                "sortBy": "relevancy",
-                "language": "en",
-                "apiKey": self.news_api_key
-            }
-            
-            logger.info(f"Making request to News API with parameters: {params}")
-            
-            response = requests.get(url, params=params)
-            if response.status_code == 200:
-                data = response.json()
-                articles = []
-                
-                for article in data.get("articles", []):
-                    articles.append({
-                        "title": article.get("title", ""),
-                        "description": article.get("description", ""),
-                        "content": article.get("content", ""),
-                        "url": article.get("url", ""),
-                        "source": article.get("source", {}).get("name", "News API")
+                # Check if prediction has expired but not been verified
+                print(expiry_timestamp)
+                print(int(datetime.now().timestamp()))
+                if not is_verified and current_timestamp >= expiry_timestamp:
+                    pending_predictions.append({
+                        'id': pred_id,
+                        'predictor': predictor,
+                        'text': text,
+                        'keywords': keywords,
+                        'expiry_timestamp': expiry_timestamp,
+                        'stake_amount': stake_amount
                     })
-                
-                logger.info(f"Found {len(articles)} articles from News API")
-                return articles
-            else:
-                logger.error(f"News API error: {response.status_code} - {response.text}")
-                if response.status_code == 401:
-                    logger.error("Invalid API key or unauthorized access")
-                elif response.status_code == 429:
-                    logger.error("Rate limit exceeded")
-                return []
+            except Exception as e:
+                print(f"Error fetching prediction {pred_id}: {str(e)}")
         
+        print(f"Found {len(pending_predictions)} pending predictions to verify")
+        return pending_predictions
+    
+    def get_news_articles(self, keywords, days_back=3):
+        """Fetch news articles based on keywords"""
+        # Convert keywords to a list and clean them
+        if isinstance(keywords, str):
+            keyword_list = [k.strip() for k in keywords.split(',')]
+        else:
+            keyword_list = keywords
+            
+        # Combine keywords for API query
+        query = ' OR '.join(keyword_list)
+        
+        # Calculate date range for search
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_back)
+        
+        # Format dates for API
+        from_date = start_date.strftime('%Y-%m-%d')
+        to_date = end_date.strftime('%Y-%m-%d')
+        
+        print(f"Searching news from {from_date} to {to_date} for keywords: {query}")
+        
+        # News API request
+        url = 'https://newsapi.org/v2/everything'
+        params = {
+            'q': query,
+            'from': from_date,
+            'to': to_date,
+            'language': 'en',
+            'sortBy': 'relevancy',
+            'apiKey': NEWS_API_KEY
+        }
+        
+        try:
+            response = requests.get(url, params=params)
+            data = response.json()
+            
+            if data.get('status') != 'ok':
+                print(f"News API error: {data.get('message', 'Unknown error')}")
+                return []
+                
+            articles = data.get('articles', [])
+            print(f"Found {len(articles)} news articles")
+            return articles
         except Exception as e:
-            logger.error(f"Error fetching from News API: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            print(f"Error fetching news: {str(e)}")
             return []
     
-    def scrape_news_websites(self, keywords):
-        """Scrape news from major websites"""
+    def scrape_additional_news(self, keywords):
+        """Scrape additional news sources for relevant articles"""
         articles = []
+        keyword_str = ' '.join(keywords.split(','))
         
-        # Define news sources to scrape
-        news_sources = [
-            {"name": "Reuters", "url": "https://www.reuters.com/", "selector": "article"},
-            {"name": "BBC", "url": "https://www.bbc.com/news", "selector": "article"},
-            {"name": "CNN", "url": "https://www.cnn.com/", "selector": "article.card"}
+        # Example search URLs (would need to be extended for production)
+        search_urls = [
+            f"https://www.reuters.com/search/news?blob={keyword_str}",
+            f"https://www.bbc.co.uk/search?q={keyword_str}&filter=news"
         ]
         
-        for source in news_sources:
+        for url in search_urls:
             try:
-                # Get website content
-                response = requests.get(source["url"], headers={"User-Agent": "Mozilla/5.0"})
-                if response.status_code != 200:
-                    continue
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+                response = requests.get(url, headers=headers, timeout=10)
                 
-                # Parse HTML
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Find articles
-                article_elements = soup.select(source["selector"])
-                
-                for element in article_elements[:10]:  # Limit to first 10 articles
-                    # Extract text content
-                    text = element.get_text().strip()
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
                     
-                    # Check if any keyword is in the text
-                    if any(keyword.lower() in text.lower() for keyword in keywords):
-                        # Find URL if available
-                        url_element = element.find('a')
-                        url = url_element.get('href') if url_element else ""
-                        
-                        # Normalize URL (handle relative URLs)
-                        if url and not url.startswith('http'):
-                            url = source["url"] + url if not url.startswith('/') else source["url"] + url
-                        
-                        articles.append({
-                            "title": element.find('h2').get_text().strip() if element.find('h2') else "",
-                            "content": text,
-                            "url": url,
-                            "source": source["name"]
-                        })
-            
+                    # The selectors below would need to be adjusted based on the actual website structure
+                    # These are examples and would not work without modification
+                    if 'reuters.com' in url:
+                        news_elements = soup.select('article.search-result-indiv')
+                        for element in news_elements[:5]:  # Limit to top 5 results
+                            title_elem = element.select_one('h3.search-result-title')
+                            desc_elem = element.select_one('div.search-result-snippet')
+                            
+                            if title_elem:
+                                articles.append({
+                                    'title': title_elem.text.strip(),
+                                    'description': desc_elem.text.strip() if desc_elem else '',
+                                    'url': 'https://www.reuters.com' + title_elem.a['href'] if title_elem.a else '',
+                                    'source': {'name': 'Reuters'}
+                                })
+                    
+                    elif 'bbc.co.uk' in url:
+                        news_elements = soup.select('div.ssrcss-1mxwxkh-PromoContent')
+                        for element in news_elements[:5]:
+                            title_elem = element.select_one('h3')
+                            desc_elem = element.select_one('p')
+                            
+                            if title_elem:
+                                articles.append({
+                                    'title': title_elem.text.strip(),
+                                    'description': desc_elem.text.strip() if desc_elem else '',
+                                    'url': 'https://www.bbc.co.uk' + title_elem.a['href'] if title_elem.a else '',
+                                    'source': {'name': 'BBC News'}
+                                })
             except Exception as e:
-                logger.error(f"Error scraping {source['name']}: {e}")
-        
-        logger.info(f"Found {len(articles)} articles from web scraping")
+                print(f"Error scraping {url}: {str(e)}")
+                
+        print(f"Scraped {len(articles)} additional articles")
         return articles
     
-    def process_text(self, text):
-        """Process text for NLP comparison"""
-        # Tokenize text
-        tokens = word_tokenize(text.lower())
+    def get_text_embedding(self, text):
+        """Get embedding vector for a text using BERT"""
+        inputs = tokenizer(text, padding=True, truncation=True, return_tensors="pt", max_length=512)
         
-        # Remove stopwords and non-alphabetic tokens
-        filtered_tokens = [w for w in tokens if w.isalpha() and w not in self.stop_words]
+        with torch.no_grad():
+            outputs = model(**inputs)
         
-        # Lemmatize
-        lemmatized = [self.lemmatizer.lemmatize(w) for w in filtered_tokens]
+        # Mean pooling - take average of all tokens
+        token_embeddings = outputs.last_hidden_state
+        attention_mask = inputs['attention_mask']
         
-        return lemmatized
+        # Multiply by attention masks to avoid including padding in the average
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+        
+        # Final embedding vector
+        embedding = sum_embeddings / sum_mask
+        return embedding[0].numpy()
     
-    def match_prediction_to_news(self, processed_prediction, articles):
-        """Match processed prediction to news articles"""
-        best_match_score = 0
-        best_match_article = None
+    def cosine_similarity(self, vec1, vec2):
+        """Calculate cosine similarity between two vectors"""
+        dot_product = np.dot(vec1, vec2)
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
+        return dot_product / (norm1 * norm2)
+    
+    def verify_prediction(self, prediction, articles):
+        """Verify if prediction is correct based on news articles"""
+        if not articles:
+            print(f"No articles found for prediction {prediction['id']}")
+            return False, "No relevant news articles found"
         
-        for article in articles:
-            # Combine title and content
-            full_text = f"{article['title']} {article['content']}"
-            
-            # Process article text
-            processed_article = self.process_text(full_text)
-            
-            # Calculate match score (percentage of prediction words in article)
-            matches = sum(1 for word in processed_prediction if word in processed_article)
-            score = matches / len(processed_prediction) if processed_prediction else 0
-            
-            if score > best_match_score:
-                best_match_score = score
-                best_match_article = article
+        # Get embedding for prediction text
+        pred_embedding = self.get_text_embedding(prediction['text'])
         
-        # Determine if prediction is correct (threshold: 60% match)
-        is_correct = best_match_score >= 0.6
+        # Get embeddings for article titles and descriptions
+        article_texts = [f"{a['title']}. {a.get('description', '')}" for a in articles]
+        article_embeddings = [self.get_text_embedding(text) for text in article_texts]
         
-        # Prepare evidence
-        if best_match_article:
-            evidence = f"Source: {best_match_article['source']}\nTitle: {best_match_article['title']}\n"
-            if best_match_article['url']:
-                evidence += f"URL: {best_match_article['url']}\n"
-            evidence += f"Match Score: {best_match_score:.2%}"
-        else:
-            evidence = "No matching news articles found."
+        # Calculate similarities
+        similarities = [self.cosine_similarity(pred_embedding, art_emb) for art_emb in article_embeddings]
         
-        return is_correct, evidence
+        # Find best matching article
+        max_sim_idx = np.argmax(similarities)
+        max_similarity = similarities[max_sim_idx]
+        best_article = articles[max_sim_idx]
+        
+        # Generate evidence text
+        evidence = f"Source: {best_article['source']['name']}. "
+        evidence += f"Title: {best_article['title']}. "
+        evidence += f"URL: {best_article['url']}"
+        
+        # Additional zero-shot classification for verification
+        classification_result = zero_shot_classifier(
+            prediction['text'],
+            [article['title'] for article in articles[:5]],  # Use top 5 articles as candidates
+            hypothesis_template="This article confirms that {}."
+        )
+        
+        # Combine semantic similarity and classification confidence
+        top_label_score = classification_result['scores'][0]
+        combined_score = (max_similarity + top_label_score) / 2
+        
+        print(f"Prediction {prediction['id']} verification:")
+        print(f"- Max similarity: {max_similarity:.4f}")
+        print(f"- Classification score: {top_label_score:.4f}")
+        print(f"- Combined score: {combined_score:.4f}")
+        print(f"- Threshold: {VERIFICATION_THRESHOLD}")
+        print(f"- Evidence: {evidence}")
+        
+        # Determine if prediction is correct
+        is_correct = combined_score >= VERIFICATION_THRESHOLD
+        
+        return is_correct, evidence[:200]  # Truncate evidence to match contract limit
     
     def submit_verification(self, prediction_id, is_correct, evidence):
-        """Submit verification result to blockchain"""
+        """Submit verification result to the smart contract"""
+        print(f"Submitting verification for prediction {prediction_id}: correct={is_correct}, evidence={evidence}")
+        
         try:
-            logger.info(f"Submitting verification for prediction #{prediction_id}")
-            logger.info(f"Is correct: {is_correct}")
-            logger.info(f"Evidence: {evidence[:100]}...")
-
-            # Get nonce
-            nonce = self.w3.eth.get_transaction_count(self.oracle_address)
-            
-            # Get gas price with 20% increase to ensure faster mining
-            base_fee = self.w3.eth.get_block('latest').baseFeePerGas
-            priority_fee = self.w3.eth.max_priority_fee
-            max_fee_per_gas = base_fee * 2 + priority_fee  # Double the base fee plus priority fee
-            
-            logger.info(f"Base fee: {base_fee}")
-            logger.info(f"Priority fee: {priority_fee}")
-            logger.info(f"Max fee per gas: {max_fee_per_gas}")
+            # Ensure is_correct is a proper boolean
+            is_correct_bool = bool(is_correct)
             
             # Build transaction
-            tx = self.contract.functions.verify_prediction(
+            txn = contract.functions.verify_prediction(
                 prediction_id,
-                is_correct,  # Use the actual verification result
+                is_correct_bool,  # Convert to explicit boolean
                 evidence
             ).build_transaction({
-                'from': self.oracle_address,
-                'nonce': nonce,
-                'gas': 300000,  # Gas limit
-                'maxFeePerGas': max_fee_per_gas,
-                'maxPriorityFeePerGas': priority_fee,
-                'chainId': self.w3.eth.chain_id,
-                'type': 2  # EIP-1559 transaction
+                'from': oracle_address,
+                'nonce': w3.eth.get_transaction_count(oracle_address),
+                'gas': 500000,
+                'gasPrice': w3.eth.gas_price
             })
             
-            logger.info(f"Transaction built: {tx}")
-            
             # Sign transaction
-            signed_tx = self.w3.eth.account.sign_transaction(
-                tx,
-                private_key=self.oracle_private_key
-            )
+            signed_txn = w3.eth.account.sign_transaction(txn, ORACLE_PRIVATE_KEY)
             
-            logger.info("Transaction signed successfully")
+            # Send transaction
+            tx_hash = w3.eth.send_raw_transaction(signed_txn.raw_transaction)
+            print(f"Transaction sent: {tx_hash.hex()}")
             
-            # Send raw transaction
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            logger.info(f"Transaction sent: {tx_hash.hex()}")
+            # Wait for transaction receipt
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+            print(f"Transaction confirmed: {receipt.transactionHash.hex()}")
+            print(f"Gas used: {receipt.gasUsed}")
             
-            # Wait for transaction receipt with increased timeout
-            logger.info("Waiting for transaction confirmation...")
-            receipt = self.w3.eth.wait_for_transaction_receipt(
-                tx_hash,
-                timeout=300,  # 5 minutes timeout
-                poll_latency=5  # Check every 5 seconds
-            )
-            
-            if receipt['status'] == 1:
-                logger.info(f"Verification submitted successfully: TX hash {tx_hash.hex()}")
-                logger.info(f"Gas used: {receipt['gasUsed']}")
-                logger.info(f"Block number: {receipt['blockNumber']}")
-                logger.info(f"Transaction index: {receipt['transactionIndex']}")
-                return True
-            else:
-                logger.error(f"Transaction failed: {receipt}")
-                return False
-            
+            return True
         except Exception as e:
-            logger.error(f"Error submitting verification: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            
-            # If it's a timeout error, provide more context
-            if "is not in the chain after" in str(e):
-                logger.error("Transaction took too long to mine. Possible reasons:")
-                logger.error("1. Network congestion")
-                logger.error("2. Gas price too low")
-                logger.error("3. Sepolia network issues")
-                logger.error("You can check the transaction status at:")
-                logger.error(f"https://sepolia.etherscan.io/tx/{tx_hash.hex()}")
-            
-            raise
-
-def authorize_oracle(w3, contract, oracle_address):
-    """Authorize an oracle address to verify predictions"""
-    try:
-        # Get owner's address and private key from environment
-        owner_address = os.getenv("OWNER_ADDRESS")
-        owner_private_key = os.getenv("OWNER_PRIVATE_KEY")
-        
-        if not owner_address or not owner_private_key:
-            raise ValueError("OWNER_ADDRESS and OWNER_PRIVATE_KEY must be set")
-            
-        # Ensure addresses are checksummed
-        owner_address = Web3.to_checksum_address(owner_address)
-        oracle_address = Web3.to_checksum_address(oracle_address)
-        
-        logger.info(f"Authorizing oracle address: {oracle_address}")
-        
-        # Check if address is already authorized
-        if contract.functions.oracle_addresses(oracle_address).call():
-            logger.info(f"Oracle address {oracle_address} is already authorized")
-            return True
-            
-        # Check if caller is owner
-        owner = contract.functions.owner().call()
-        if owner.lower() != owner_address.lower():
-            raise ValueError(f"Only contract owner can add oracles. Owner: {owner}")
-        
-        # Build transaction
-        tx = contract.functions.add_oracle(oracle_address).build_transaction({
-            'from': owner_address,
-            'nonce': w3.eth.get_transaction_count(owner_address),
-            'gas': 100000,  # Gas limit
-            'gasPrice': w3.eth.gas_price,
-            'chainId': w3.eth.chain_id
-        })
-        
-        # Sign transaction
-        signed_tx = w3.eth.account.sign_transaction(tx, private_key=owner_private_key)
-        
-        # Send transaction
-        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        logger.info(f"Authorization transaction sent: {tx_hash.hex()}")
-        
-        # Wait for receipt
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
-        
-        if receipt['status'] == 1:
-            logger.info(f"Successfully authorized oracle address: {oracle_address}")
-            logger.info(f"Transaction hash: {tx_hash.hex()}")
-            return True
-        else:
-            logger.error(f"Failed to authorize oracle: {receipt}")
+            print(f"Error submitting verification: {str(e)}")
             return False
-            
-    except Exception as e:
-        logger.error(f"Error authorizing oracle: {e}")
-        logger.error(f"Error type: {type(e).__name__}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise
-
-# Main function
-def main():
-    try:
-        # Initialize Web3 and contract
-        w3 = initialize_web3()
-        contract = load_contract(w3)
+    
+    def process_pending_predictions(self):
+        """Process all pending predictions"""
+        pending_predictions = self.get_pending_predictions()
         
-        try:
-            code = w3.eth.get_code(contract.address)
-            if code == b'' or code == '0x':
-                logger.error("No contract code found at the specified address!")
-                logger.error(contract.address)
-                return 1
+        for prediction in pending_predictions:
+            print(f"\nProcessing prediction {prediction['id']}: {prediction['text']}")
+            
+            # Fetch news articles
+            articles = self.get_news_articles(prediction['keywords'])
+            
+            # Add scraped articles if needed
+            if len(articles) < 5:
+                scraped_articles = self.scrape_additional_news(prediction['keywords'])
+                articles.extend(scraped_articles)
+            
+            # Verify prediction
+            is_correct, evidence = self.verify_prediction(prediction, articles)
+            
+            # Submit verification to blockchain
+            success = self.submit_verification(prediction['id'], is_correct, evidence)
+            
+            if success:
+                print(f"Successfully verified prediction {prediction['id']}")
             else:
-                logger.info(f"Contract code found at {contract.address}")
-        except Exception as e:
-            logger.error(f"Failed to check contract code: {e}")
-            return 1
-
-        # Get oracle address from environment
-        oracle_address = os.getenv("ORACLE_ADDRESS")
-        if not oracle_address:
-            logger.error("ORACLE_ADDRESS environment variable not set")
-            return 1
+                print(f"Failed to verify prediction {prediction['id']}")
             
-        # Authorize oracle if needed
-        try:
-            if not authorize_oracle(w3, contract, oracle_address):
-                logger.error("Failed to authorize oracle")
-                return 1
-        except Exception as e:
-            logger.error(f"Error during oracle authorization: {e}")
-            return 1
-        
-        # Create verifier
-        verifier = NewsVerifier(w3, contract)
-        
-        # Schedule verification job
-        schedule.every().hour.do(verifier.check_pending_predictions)
-        
-        # Run once immediately
-        verifier.check_pending_predictions()
-        
-        # Keep running
-        logger.info("Oracle service started. Running verification every hour.")
-        while True:
-            schedule.run_pending()
-            time.sleep(60)
+            # Delay between processing predictions
+            time.sleep(2)
+
+def run_verification_job():
+    """Run the verification job"""
+    print("\n===== Starting verification job =====")
+    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    except KeyboardInterrupt:
-        logger.info("Service stopped by user.")
+    try:
+        verifier = PredictionVerifier()
+        print("Processing pending predictions...")
+        verifier.process_pending_predictions()
+        print("===== Verification job completed =====\n")
     except Exception as e:
-        logger.error(f"Service error: {e}")
-        return 1
+        print(f"Error in verification job: {str(e)}")
+
+def main():
+    print("Starting NewsOracle Prediction Verifier")
+    print(f"Connected to network: {w3.eth.chain_id}")
+    print(f"Oracle address: {oracle_address}")
     
-    return 0
+    # Run immediately on startup
+    run_verification_job()
+    
+    # Schedule to run every 4 hours
+    schedule.every(4).hours.do(run_verification_job)
+    
+    # Main loop
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
 
 if __name__ == "__main__":
-    exit(main())
+    main()

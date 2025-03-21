@@ -82,7 +82,7 @@ def load_contract(w3):
     try:
         # Get contract address and ABI from environment
         contract_address = os.getenv("CONTRACT_ADDRESS")
-        abi_file = os.getenv("CONTRACT_ABI_FILE", "PredictifyContract.json")
+        abi_file = os.getenv("CONTRACT_ABI_FILE", "n/PredictifyContract.json")
         
         if not contract_address:
             raise ValueError("CONTRACT_ADDRESS environment variable not set")

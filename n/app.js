@@ -2,7 +2,7 @@
 
 // Contract ABI - This would be generated from your compiled Vyper contract
 let contractABI = []; // Include actual ABI here after compilation
-const contractAddress = "0x89a6e163b23548ba7e7fa736bbedf580d1be83ae"; // Deploy the contract and include its address here
+const contractAddress = "0xa7d9f1b1B0Bb3c87C68A49579A3D0D77fbb425d4"; // Deploy the contract and include its address here
 
 // Global variables
 let web3;
@@ -12,7 +12,7 @@ let predictions = [];
 
 async function loadContractABI() {
     try {
-        const response = await fetch('PredictifyContract.json');
+        const response = await fetch('./PredictifyContract.json');
         contractABI = await response.json();
         console.log(contractABI);
     }
@@ -68,9 +68,9 @@ function setupEventListeners() {
     
     // Set minimum date for prediction expiry
     const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
     const minDate = tomorrow.toISOString().split('T')[0];
-    document.getElementById('prediction-expiry').setAttribute('min', minDate);
+    //document.getElementById('prediction-expiry').setAttribute('min', minDate);
 }
 
 // Connect wallet function
@@ -125,6 +125,52 @@ async function loadUserData() {
         const ethBalance = ethers.formatEther(balance);
         document.getElementById('user-balance').textContent = `${parseFloat(ethBalance).toFixed(4)} ETH`;
         
+        // Try to claim any pending rewards
+        console.log("Claiming pending rewards...");
+        try {
+            const predictions = await contract.get_user_predictions(userAccount);
+            for (const predictionId of predictions) {
+                const prediction = await contract.get_prediction_details(predictionId);
+                const isVerified = prediction[5];
+                const isCorrect = prediction[6];
+                const isClaimed = prediction[8];
+                console.log(isVerified, isCorrect, isClaimed)
+                
+                if (isVerified && isCorrect && !isClaimed) {
+                    console.log(`Found unclaimed reward for prediction #${predictionId}`);
+                    try {
+                        // Get gas estimate
+                        const gasEstimate = await contract.claim_reward.estimateGas(predictionId);
+                        
+                        // Send transaction with 20% gas buffer
+                        const tx = await contract.claim_reward(
+                            predictionId,
+                            {
+                                gasLimit: BigInt(Math.floor(Number(gasEstimate) * 1.2))
+                            }
+                        );
+                        
+                        console.log(`Claiming reward for prediction #${predictionId}...`);
+                        console.log("Transaction hash:", tx.hash);
+                        
+                        // Wait for transaction confirmation
+                        const receipt = await tx.wait();
+                        console.log("Claim transaction confirmed:", receipt);
+                        
+                        if (receipt.status === 1) {
+                            console.log(`Successfully claimed reward for prediction #${predictionId}`);
+                            showSuccess(`Successfully claimed reward for prediction #${predictionId}`);
+                        }
+                    } catch (claimError) {
+                        console.error(`Error claiming reward for prediction #${predictionId}:`, claimError);
+                        // Don't show error to user here as this is automatic claiming
+                    }
+                }
+            }
+        } catch (error) {
+            console.error("Error checking for unclaimed rewards:", error);
+        }
+        
         // Get user's predictions
         let predictionIds;
         try {
@@ -135,7 +181,6 @@ async function loadUserData() {
             predictionIds = predictionIds.map(id => Number(id));
         } catch (error) {
             console.log("No predictions found for user:", error);
-            console.log(predictionIds); 
             predictionIds = [];
         }
         
@@ -260,11 +305,15 @@ function createPredictionCard(prediction) {
         statusBadge = '<span class="px-3 py-1 bg-red-100 text-red-800 rounded-full text-xs font-medium">Incorrect</span>';
     }
     
-    // Format expiry date
-    const expiryFormatted = prediction.expiryDate.toLocaleDateString('en-US', {
+    // Format expiry date in UTC
+    const expiryFormatted = prediction.expiryDate.toLocaleString('en-US', {
         year: 'numeric',
         month: 'short',
-        day: 'numeric'
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'UTC',
+        timeZoneName: 'short'
     });
     
     // Create card content
@@ -324,13 +373,21 @@ async function createPrediction(event) {
         // Format prediction text
         const predictionText = `${title}: ${details}`;
         
-        console.log(expiryDateStr)
-        // Convert expiry date to timestamp
-        const expiryDate = new Date(expiryDateStr);
-        console.log(expiryDate)
-        expiryDate.setHours(23, 59, 59, 999); // End of day
-        const expiryTimestamp = Math.floor(expiryDate.getTime() / 1000);
+        console.log("expiryDateStr", expiryDateStr)
+        // Convert expiry date to UTC timestamp
+        const expiryDate = new Date(`${expiryDateStr}T00:00:00Z`); // Note the 'Z' to specify UTC
+        console.log("expiryDate before hour set:", expiryDate.toISOString())
         
+        // Set to current UTC time plus 2 minutes
+        const now = new Date();
+        expiryDate.setUTCHours(now.getUTCHours());
+        expiryDate.setUTCMinutes(now.getUTCMinutes() + 1);
+        expiryDate.setUTCSeconds(now.getUTCSeconds());
+        expiryDate.setUTCMilliseconds(now.getUTCMilliseconds());
+        
+        console.log("expiryDate after time set:", expiryDate.toISOString())
+        const expiryTimestamp = Math.floor(expiryDate.getTime() / 1000);
+        console.log("expiryTimestamp (UTC):", expiryTimestamp)
         // Convert stake amount to wei
         const stakeAmountWei = ethers.parseEther(stakeAmount.toString());
         

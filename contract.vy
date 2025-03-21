@@ -1,122 +1,133 @@
-# @version ^0.3.9
+# @version 0.3.7
 
-# PredictifyContract: A smart contract for NewsOracle DApp
-# This contract allows users to make predictions about future events
-# and verify them based on evidence
-
+# Interfaces
 from vyper.interfaces import ERC20
-
-struct Prediction:
-    predictor: address
-    text: String[1000]  # Prediction text (title + details)
-    keywords: String[200]  # Keywords for verification
-    expiry_date: uint256  # Timestamp when the prediction expires
-    stake_amount: uint256  # Amount staked on the prediction
-    is_verified: bool  # Whether the prediction has been verified
-    is_correct: bool  # Whether the prediction was correct
-    evidence: String[1000]  # Evidence of verification
-    is_claimed: bool  # Whether the reward has been claimed
-
-# State variables
-owner: public(address)
-oracle_addresses: public(HashMap[address, bool])  # Addresses authorized to verify predictions
-prediction_count: public(uint256)
-predictions: public(HashMap[uint256, Prediction])
-user_predictions: public(HashMap[address, DynArray[uint256, 100]])  # Maps user address to their prediction IDs
-fee_percentage: public(uint256)  # Fee percentage (out of 100)
 
 # Events
 event PredictionCreated:
-    prediction_id: indexed(uint256)
-    predictor: indexed(address)
-    text: String[1000]
-    expiry_date: uint256
+    prediction_id: uint256
+    predictor: address
+    text: String[500]
+    keywords: String[100]
+    expiry_timestamp: uint256
     stake_amount: uint256
 
 event PredictionVerified:
-    prediction_id: indexed(uint256)
+    prediction_id: uint256
     is_correct: bool
-    evidence: String[1000]
-    
+    evidence: String[200]
+
 event RewardClaimed:
-    prediction_id: indexed(uint256)
-    predictor: indexed(address)
+    prediction_id: uint256
+    predictor: address
     amount: uint256
+
+# Structs
+struct Prediction:
+    predictor: address
+    text: String[500]
+    keywords: String[100]
+    expiry_timestamp: uint256
+    stake_amount: uint256
+    is_verified: bool
+    is_correct: bool
+    evidence: String[200]
+    is_claimed: bool
+
+# Storage variables
+prediction_count: public(uint256)
+predictions: public(HashMap[uint256, Prediction])
+user_predictions: public(HashMap[address, DynArray[uint256, 100]])
+oracle_address: public(address)
+verification_fee_percentage: public(uint256)  # In basis points (e.g., 500 = 5%)
+owner: public(address)
+
+# Constants
+REWARD_MULTIPLIER: constant(uint256) = 150  # 150% of stake (get back 1.5x stake)
+BASIS_POINTS: constant(uint256) = 10000
+MAX_PREDICTIONS: constant(uint256) = 1000  # Maximum number of predictions allowed
 
 @external
 def __init__():
     """
-    Initialize the contract.
+    Initialize contract with the deployer as owner and oracle
     """
     self.owner = msg.sender
-    self.oracle_addresses[msg.sender] = True
+    self.oracle_address = msg.sender
     self.prediction_count = 0
-    self.fee_percentage = 5  # 5% fee
+    self.verification_fee_percentage = 500  # 5% fee by default
 
 @external
 @payable
-def create_prediction(prediction_text: String[1000], keywords: String[200], expiry_date: uint256) -> uint256:
+def create_prediction(text: String[500], keywords: String[100], expiry_timestamp: uint256) -> uint256:
     """
-    Create a new prediction.
+    Create a new prediction with a stake
+    
+    @param text The prediction text
+    @param keywords Keywords related to the prediction
+    @param expiry_timestamp Unix timestamp when the prediction expires
+    @return The prediction ID
     """
-    # Ensure stake amount > 0
-    assert msg.value >= 0, "Stake amount must be greater than 0"
+    # Validate inputs
+    assert len(text) > 0, "Prediction text cannot be empty"
+    assert len(keywords) > 0, "Keywords cannot be empty"
+    assert expiry_timestamp > block.timestamp, "Expiry must be in the future"
+    assert msg.value > 0, "Stake amount must be greater than 0"
     
-    # Ensure expiry date is in the future
-    assert expiry_date > block.timestamp, "Expiry date must be in the future"
-    
-    # Create prediction
+    # Create new prediction ID
     prediction_id: uint256 = self.prediction_count + 1
     self.prediction_count = prediction_id
     
-    # Store prediction details
+    # Store prediction
     self.predictions[prediction_id] = Prediction({
         predictor: msg.sender,
-        text: prediction_text,
+        text: text,
         keywords: keywords,
-        expiry_date: expiry_date,
-        stake_amount: 0,
+        expiry_timestamp: expiry_timestamp,
+        stake_amount: msg.value,
         is_verified: False,
         is_correct: False,
         evidence: "",
         is_claimed: False
     })
     
-    # Add prediction ID to user's list
-    user_preds: DynArray[uint256, 100] = self.user_predictions[msg.sender]
-    user_preds.append(prediction_id)
-    self.user_predictions[msg.sender] = user_preds
+    # Add to user's predictions
+    user_predictions_list: DynArray[uint256, 100] = self.user_predictions[msg.sender]
+    user_predictions_list.append(prediction_id)
+    self.user_predictions[msg.sender] = user_predictions_list
     
     # Emit event
-    log PredictionCreated(prediction_id, msg.sender, prediction_text, expiry_date, msg.value)
+    log PredictionCreated(prediction_id, msg.sender, text, keywords, expiry_timestamp, msg.value)
     
     return prediction_id
 
 @external
-def verify_prediction(prediction_id: uint256, is_correct: bool, evidence: String[1000]):
+def verify_prediction(prediction_id: uint256, is_correct: bool, evidence: String[200]):
     """
-    Verify a prediction.
+    Verify a prediction as correct or incorrect
+    
+    @param prediction_id The ID of the prediction to verify
+    @param is_correct Whether the prediction is correct
+    @param evidence Evidence supporting the verification
     """
-    # Ensure caller is an oracle
-    assert self.oracle_addresses[msg.sender], "Caller is not an oracle"
+    # Only oracle can verify predictions
+    assert msg.sender == self.oracle_address, "Only oracle can verify predictions"
     
-    # Ensure prediction exists
-    assert prediction_id <= self.prediction_count, "Prediction does not exist"
+    # Check prediction exists
+    assert prediction_id > 0 and prediction_id <= self.prediction_count, "Invalid prediction ID"
     
-    # Get prediction
     prediction: Prediction = self.predictions[prediction_id]
     
-    # Ensure prediction is not already verified
+    # Check prediction is not already verified
     assert not prediction.is_verified, "Prediction already verified"
     
-    # Ensure prediction has expired
-    assert block.timestamp > prediction.expiry_date, "Prediction has not expired yet"
+    # Check prediction has expired
+    assert block.timestamp >= prediction.expiry_timestamp, "Prediction has not expired yet"
     
     # Update prediction
-    prediction.is_verified = True
-    prediction.is_correct = is_correct
-    prediction.evidence = evidence
-    self.predictions[prediction_id] = prediction
+    self.predictions[prediction_id].is_verified = True
+    self.predictions[prediction_id].is_correct = is_correct
+    self.predictions[prediction_id].evidence = evidence
     
     # Emit event
     log PredictionVerified(prediction_id, is_correct, evidence)
@@ -124,140 +135,126 @@ def verify_prediction(prediction_id: uint256, is_correct: bool, evidence: String
 @external
 def claim_reward(prediction_id: uint256):
     """
-    Claim reward for a correct prediction.
-    """
-    # Ensure prediction exists
-    assert prediction_id <= self.prediction_count, "Prediction does not exist"
+    Claim reward for a correct prediction
     
-    # Get prediction
+    @param prediction_id The ID of the prediction to claim reward for
+    """
+    # Check prediction exists
+    assert prediction_id > 0 and prediction_id <= self.prediction_count, "Invalid prediction ID"
+    
     prediction: Prediction = self.predictions[prediction_id]
     
-    # Ensure caller is the predictor
-    assert msg.sender == prediction.predictor, "Only predictor can claim reward"
+    # Check prediction belongs to caller
+    assert prediction.predictor == msg.sender, "Not your prediction"
     
-    # Ensure prediction is verified
+    # Check prediction is verified as correct
     assert prediction.is_verified, "Prediction not verified yet"
-    
-    # Ensure prediction is correct
     assert prediction.is_correct, "Prediction was incorrect"
     
-    # Ensure reward has not been claimed
+    # Check reward not already claimed
     assert not prediction.is_claimed, "Reward already claimed"
     
     # Mark as claimed
-    prediction.is_claimed = True
-    self.predictions[prediction_id] = prediction
+    self.predictions[prediction_id].is_claimed = True
     
-    # Calculate reward
-    # For correct predictions, user gets their stake back plus fees from incorrect predictions
-    reward: uint256 = prediction.stake_amount
+    # Calculate reward amount
+    reward_amount: uint256 = prediction.stake_amount * REWARD_MULTIPLIER / 100
     
-    # Send reward
-    send(prediction.predictor, reward)
+    # Transfer reward
+    send(msg.sender, reward_amount)
     
     # Emit event
-    log RewardClaimed(prediction_id, prediction.predictor, reward)
+    log RewardClaimed(prediction_id, msg.sender, reward_amount)
 
-@view
 @external
-def get_prediction_details(prediction_id: uint256) -> Prediction:
+@view
+def get_prediction_details(prediction_id: uint256) -> (address, String[500], String[100], uint256, uint256, bool, bool, String[200], bool):
     """
-    Get details of a prediction.
-    """
-    # Ensure prediction exists
-    assert prediction_id <= self.prediction_count, "Prediction does not exist"
+    Get all details about a prediction
     
-    return self.predictions[prediction_id]
+    @param prediction_id The ID of the prediction
+    @return All prediction details
+    """
+    assert prediction_id > 0 and prediction_id <= self.prediction_count, "Invalid prediction ID"
+    
+    prediction: Prediction = self.predictions[prediction_id]
+    
+    return (
+        prediction.predictor,
+        prediction.text,
+        prediction.keywords,
+        prediction.expiry_timestamp,
+        prediction.stake_amount,
+        prediction.is_verified,
+        prediction.is_correct,
+        prediction.evidence,
+        prediction.is_claimed
+    )
 
-@view
 @external
+@view
 def get_user_predictions(user: address) -> DynArray[uint256, 100]:
     """
-    Get all prediction IDs for a user.
+    Get all prediction IDs created by a user
+    
+    @param user The user address
+    @return Array of prediction IDs
     """
     return self.user_predictions[user]
 
 @external
-def add_oracle(oracle_address: address):
+def change_oracle(new_oracle: address):
     """
-    Add a new oracle address.
-    """
-    # Ensure caller is owner
-    assert msg.sender == self.owner, "Only owner can add oracles"
+    Change the oracle address
     
-    # Add oracle
-    self.oracle_addresses[oracle_address] = True
+    @param new_oracle The new oracle address
+    """
+    assert msg.sender == self.owner, "Only owner can change oracle"
+    assert new_oracle != empty(address), "Invalid oracle address"
+    
+    self.oracle_address = new_oracle
 
 @external
-def remove_oracle(oracle_address: address):
+def change_verification_fee(new_fee_percentage: uint256):
     """
-    Remove an oracle address.
-    """
-    # Ensure caller is owner
-    assert msg.sender == self.owner, "Only owner can remove oracles"
+    Change the verification fee percentage
     
-    # Remove oracle
-    self.oracle_addresses[oracle_address] = False
+    @param new_fee_percentage The new fee percentage in basis points
+    """
+    assert msg.sender == self.owner, "Only owner can change fee"
+    assert new_fee_percentage <= 2000, "Fee cannot exceed 20%"
+    
+    self.verification_fee_percentage = new_fee_percentage
 
 @external
-def set_fee_percentage(new_percentage: uint256):
+def withdraw_fees():
     """
-    Set the fee percentage.    
+    Withdraw accumulated fees to owner
     """
-    # Ensure caller is owner
-    assert msg.sender == self.owner, "Only owner can set fee percentage"
+    assert msg.sender == self.owner, "Only owner can withdraw fees"
     
-    # Ensure percentage is valid
-    assert new_percentage <= 20, "Fee percentage cannot exceed 20%"
+    # Calculate amount that can be withdrawn (contract balance minus staked funds)
+    staked_amount: uint256 = 0
     
-    # Set fee percentage
-    self.fee_percentage = new_percentage
-
-@external
-def distribute_rewards_to_pool(pool_address: address):
-    """
-    Distribute accumulated fees to reward pool.
-    """
-    # Ensure caller is owner
-    assert msg.sender == self.owner, "Only owner can distribute rewards"
+    # Calculate total staked amount for active predictions
+    for i in range(MAX_PREDICTIONS):
+        if i >= self.prediction_count:
+            break
+        prediction: Prediction = self.predictions[i + 1]  # +1 because prediction IDs start at 1
+        # Add stake amounts for predictions that are not verified or verified correct but not claimed
+        if (not prediction.is_verified) or (prediction.is_correct and not prediction.is_claimed):
+            staked_amount += prediction.stake_amount
     
-    # Get contract balance
-    balance: uint256 = self.balance
+    withdrawable_amount: uint256 = self.balance - staked_amount
+    assert withdrawable_amount > 0, "No fees to withdraw"
     
-    # Ensure there are funds to distribute
-    assert balance > 0, "No funds to distribute"
-    
-    # Send funds to pool
-    send(pool_address, balance)
+    # Transfer withdrawable amount to owner
+    send(self.owner, withdrawable_amount)
 
 @external
 @payable
-def add_to_reward_pool():
+def __default__():
     """
-    Add funds to the reward pool.
+    Fallback function to accept ETH
     """
-    # Nothing to do, funds are automatically added to contract balance
     pass
-
-@external
-def withdraw_unclaimed_funds(amount: uint256):
-    """
-    Withdraw unclaimed funds.    
-    """
-    # Ensure caller is owner
-    assert msg.sender == self.owner, "Only owner can withdraw funds"
-    
-    # Ensure amount is valid
-    assert amount <= self.balance, "Insufficient balance"
-    
-    # Send funds to owner
-    send(self.owner, amount)
-
-@external
-@view
-def get_contract_balance() -> uint256:
-    """
-    Get the contract balance.
-    
-    """
-    return self.balance

@@ -209,13 +209,21 @@ class NewsVerifier:
         """Verify a prediction against news sources and handle rewards"""
         try:
             logger.info(f"Starting verification for prediction #{prediction_id}")
-            logger.info(f"Prediction text: {prediction_text}")
-            logger.info(f"Keywords: {keywords}")
             
             # Get prediction details first to check current state
             prediction = self.contract.functions.get_prediction_details(prediction_id).call()
             predictor_address = prediction[0]
+            prediction_text = prediction[1]
+            keywords = prediction[2]
+            expiry_timestamp = prediction[3]
+            stake_amount = prediction[4]
             is_verified = prediction[5]
+            
+            # Check if prediction can be verified
+            current_time = datetime.now().timestamp()
+            # if current_time <= expiry_timestamp:
+            #     logger.warning(f"Prediction #{prediction_id} has not expired yet. Current time: {current_time}, Expiry: {expiry_timestamp}")
+            #     return
             
             if is_verified:
                 logger.info(f"Prediction #{prediction_id} is already verified")
@@ -234,29 +242,35 @@ class NewsVerifier:
             
             if not articles:
                 logger.warning(f"No articles found for prediction #{prediction_id}")
-                return
-            
-            logger.info(f"Found {len(articles)} articles to analyze")
-            
-            # Process prediction text
-            processed_prediction = self.process_text(prediction_text)
-            if not processed_prediction:
-                logger.warning(f"No valid text to process in prediction #{prediction_id}")
-                return
+                # If no articles found, mark as incorrect
+                is_correct = False
+                evidence = "No matching news articles found within the verification period."
+            else:
+                logger.info(f"Found {len(articles)} articles to analyze")
                 
-            # Check if prediction matches any news
-            is_correct, evidence = self.match_prediction_to_news(processed_prediction, articles)
+                # Process prediction text
+                processed_prediction = self.process_text(prediction_text)
+                if not processed_prediction:
+                    logger.warning(f"No valid text to process in prediction #{prediction_id}")
+                    is_correct = False
+                    evidence = "Invalid prediction text format."
+                else:
+                    # Check if prediction matches any news
+                    is_correct, evidence = self.match_prediction_to_news(processed_prediction, articles)
             
             logger.info(f"Prediction #{prediction_id} verified: {'Correct' if is_correct else 'Incorrect'}")
             logger.info(f"Evidence: {evidence[:100]}...")
             
-            # Submit verification to blockchain with retry
-            #self.submit_verification_with_retry(prediction_id, is_correct, evidence)
-            # If prediction is correct, help user claim reward
-            if is_correct:
-                logger.info(f"Prediction #{prediction_id} is correct. Attempting to claim reward for user...")
+            # Submit verification to blockchain
+            verification_success = self.submit_verification_with_retry(prediction_id, is_correct, evidence)
+            
+            # Only attempt to claim reward if verification was successful and prediction was correct
+            if verification_success and is_correct:
+                logger.info(f"Prediction #{prediction_id} is correct. Attempting to claim reward...")
                 try:
-                    self.claim_reward_for_user(prediction_id, predictor_address)
+                    # Wait for the verification transaction to be fully confirmed
+                    time.sleep(15)  # Wait 15 seconds for verification to be confirmed
+                    self.claim_reward_for_user(prediction_id, predictor_address, stake_amount)
                 except Exception as e:
                     logger.error(f"Failed to claim reward for prediction #{prediction_id}: {e}")
             
@@ -266,14 +280,22 @@ class NewsVerifier:
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
 
-    def claim_reward_for_user(self, prediction_id, predictor_address):
+    def claim_reward_for_user(self, prediction_id, predictor_address, stake_amount):
         """Helper method to claim reward for a correct prediction"""
         try:
-            # Get prediction details to verify it's claimable
+            # Double check prediction state before claiming
             prediction = self.contract.functions.get_prediction_details(prediction_id).call()
-            #is_verified = prediction[5]
-            #is_correct = prediction[6]
+            is_verified = prediction[5]
+            is_correct = prediction[6]
             is_claimed = prediction[8]
+            
+            if not is_verified:
+                logger.warning(f"Cannot claim reward for prediction #{prediction_id}: not verified yet")
+                return
+                
+            if not is_correct:
+                logger.warning(f"Cannot claim reward for prediction #{prediction_id}: prediction was incorrect")
+                return
                 
             if is_claimed:
                 logger.warning(f"Reward for prediction #{prediction_id} has already been claimed")
@@ -281,72 +303,107 @@ class NewsVerifier:
             
             logger.info(f"Claiming reward for prediction #{prediction_id}")
             
-            
-            # nonce = self.w3.eth.get_transaction_count(predictor_address)
-            
-            # # Get gas price
-            # base_fee = self.w3.eth.get_block('latest').baseFeePerGas
-            # priority_fee = self.w3.eth.max_priority_fee
-            # max_fee_per_gas = base_fee * 2 + priority_fee
-            
-            # # Build transaction
-            # tx = self.contract.functions.claim_reward(prediction_id).build_transaction({
-            #     'from': self.oracle_address,
-            #     'nonce': nonce,
-            #     'gas': 300000,
-            #     'maxFeePerGas': max_fee_per_gas,
-            #     'maxPriorityFeePerGas': priority_fee,
-            #     'chainId': self.w3.eth.chain_id,
-            #     'type': 2
-            # })
-            
-            # logger.info(f"Claim reward transaction built: {tx}")
-            
-            # # Sign and send transaction
-            # signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=self.oracle_private_key)
-            # tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            
-            # logger.info(f"Claim reward transaction sent: {tx_hash.hex()}")
-            
-            # # Wait for receipt
-            # receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
-            
-            # if receipt['status'] == 1:
-            #     logger.info(f"Successfully claimed reward for prediction #{prediction_id}")
-            #     logger.info(f"Transaction hash: {tx_hash.hex()}")
-            # else:
-            #     logger.error(f"Failed to claim reward: {receipt}")
-            
             # Get nonce
-            amount_in_eth = 0.001 + (prediction[4])
-            logger.info(f"Amount in ETH: {prediction[4]}")
-            amount_in_wei = self.w3.to_wei(amount_in_eth, 'ether')
-
-            # Get the nonce for the sender address
             nonce = self.w3.eth.get_transaction_count(self.oracle_address)
-
-            # Prepare transaction
-            tx = {
-                'nonce': nonce,
-                'to': prediction[0],
-                'value': amount_in_wei,
-                'gas': 21000,  # Standard gas limit for ETH transfers
-                'gasPrice': self.w3.eth.gas_price,
-                'chainId': 11155111,
-            }
             
-            logger.info(f"Transaction built: {tx}")
-
-            # Sign the transaction
-            signed_tx = self.w3.eth.account.sign_transaction(tx, self.oracle_private_key)
-
-            # Send the transaction
+            # Get gas price
+            if hasattr(self.w3.eth, 'max_priority_fee'):
+                # EIP-1559 transaction
+                base_fee = self.w3.eth.get_block('latest').baseFeePerGas
+                priority_fee = self.w3.eth.max_priority_fee
+                max_fee_per_gas = base_fee * 2 + priority_fee
+                
+                # Build transaction
+                tx = self.contract.functions.claim_reward(prediction_id).build_transaction({
+                    'from': predictor_address,  # Important: use predictor's address
+                    'nonce': nonce,
+                    'gas': 300000,
+                    'maxFeePerGas': max_fee_per_gas,
+                    'maxPriorityFeePerGas': priority_fee,
+                    'chainId': self.w3.eth.chain_id,
+                    'type': 2
+                })
+            else:
+                # Legacy transaction
+                gas_price = self.w3.eth.gas_price
+                gas_price = int(gas_price * 1.2)  # Add 20% to gas price
+                
+                tx = self.contract.functions.claim_reward(prediction_id).build_transaction({
+                    'from': predictor_address,  # Important: use predictor's address
+                    'nonce': nonce,
+                    'gas': 300000,
+                    'gasPrice': gas_price,
+                    'chainId': self.w3.eth.chain_id
+                })
+            
+            logger.info(f"Claim reward transaction built: {tx}")
+            
+            # Sign and send transaction
+            signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=self.oracle_private_key)
             tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            print(f"Transaction sent! Hash: {self.w3.to_hex(tx_hash)}")
+            
+            logger.info(f"Claim reward transaction sent: {tx_hash.hex()}")
+            
+            # Wait for receipt
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            
+            if receipt['status'] == 1:
+                logger.info(f"Successfully claimed reward for prediction #{prediction_id}")
+                logger.info(f"Transaction hash: {tx_hash.hex()}")
+            else:
+                logger.error(f"Failed to claim reward: {receipt}")
+                # If claiming fails, try sending ETH directly
+                self.send_reward_directly(predictor_address, stake_amount)
                 
         except Exception as e:
             logger.error(f"Error claiming reward: {e}")
-            raise
+            logger.error(f"Error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # If contract interaction fails, try sending ETH directly
+            self.send_reward_directly(predictor_address, stake_amount)
+
+    def send_reward_directly(self, recipient_address, stake_amount):
+        """Send reward directly to the user's address if contract claim fails"""
+        try:
+            logger.info(f"Attempting to send reward directly to {recipient_address}")
+            
+            # Calculate reward amount (stake amount plus small bonus)
+            reward_amount = stake_amount + self.w3.to_wei(0.001, 'ether')  # Add 0.001 ETH bonus
+            
+            # Get nonce
+            nonce = self.w3.eth.get_transaction_count(self.oracle_address)
+            
+            # Prepare transaction
+            tx = {
+                'nonce': nonce,
+                'to': recipient_address,
+                'value': reward_amount,
+                'gas': 21000,  # Standard gas limit for ETH transfers
+                'gasPrice': self.w3.eth.gas_price,
+                'chainId': self.w3.eth.chain_id
+            }
+            
+            # Sign and send transaction
+            signed_tx = self.w3.eth.account.sign_transaction(tx, self.oracle_private_key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            
+            logger.info(f"Direct reward transaction sent: {tx_hash.hex()}")
+            
+            # Wait for receipt
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            
+            if receipt['status'] == 1:
+                logger.info(f"Successfully sent reward directly to {recipient_address}")
+                logger.info(f"Transaction hash: {tx_hash.hex()}")
+            else:
+                logger.error(f"Failed to send direct reward: {receipt}")
+                
+        except Exception as e:
+            logger.error(f"Error sending direct reward: {e}")
+            logger.error(f"Error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def fetch_news(self, keywords):
         """Fetch news articles related to keywords"""
@@ -606,6 +663,66 @@ class NewsVerifier:
             
             raise
 
+def authorize_oracle(w3, contract, oracle_address):
+    """Authorize an oracle address to verify predictions"""
+    try:
+        # Get owner's address and private key from environment
+        owner_address = os.getenv("OWNER_ADDRESS")
+        owner_private_key = os.getenv("OWNER_PRIVATE_KEY")
+        
+        if not owner_address or not owner_private_key:
+            raise ValueError("OWNER_ADDRESS and OWNER_PRIVATE_KEY must be set")
+            
+        # Ensure addresses are checksummed
+        owner_address = Web3.to_checksum_address(owner_address)
+        oracle_address = Web3.to_checksum_address(oracle_address)
+        
+        logger.info(f"Authorizing oracle address: {oracle_address}")
+        
+        # Check if address is already authorized
+        if contract.functions.oracle_addresses(oracle_address).call():
+            logger.info(f"Oracle address {oracle_address} is already authorized")
+            return True
+            
+        # Check if caller is owner
+        owner = contract.functions.owner().call()
+        if owner.lower() != owner_address.lower():
+            raise ValueError(f"Only contract owner can add oracles. Owner: {owner}")
+        
+        # Build transaction
+        tx = contract.functions.add_oracle(oracle_address).build_transaction({
+            'from': owner_address,
+            'nonce': w3.eth.get_transaction_count(owner_address),
+            'gas': 100000,  # Gas limit
+            'gasPrice': w3.eth.gas_price,
+            'chainId': w3.eth.chain_id
+        })
+        
+        # Sign transaction
+        signed_tx = w3.eth.account.sign_transaction(tx, private_key=owner_private_key)
+        
+        # Send transaction
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        logger.info(f"Authorization transaction sent: {tx_hash.hex()}")
+        
+        # Wait for receipt
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+        
+        if receipt['status'] == 1:
+            logger.info(f"Successfully authorized oracle address: {oracle_address}")
+            logger.info(f"Transaction hash: {tx_hash.hex()}")
+            return True
+        else:
+            logger.error(f"Failed to authorize oracle: {receipt}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error authorizing oracle: {e}")
+        logger.error(f"Error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
+
 # Main function
 def main():
     try:
@@ -618,11 +735,27 @@ def main():
             if code == b'' or code == '0x':
                 logger.error("No contract code found at the specified address!")
                 logger.error(contract.address)
+                return 1
             else:
                 logger.info(f"Contract code found at {contract.address}")
         except Exception as e:
             logger.error(f"Failed to check contract code: {e}")
+            return 1
 
+        # Get oracle address from environment
+        oracle_address = os.getenv("ORACLE_ADDRESS")
+        if not oracle_address:
+            logger.error("ORACLE_ADDRESS environment variable not set")
+            return 1
+            
+        # Authorize oracle if needed
+        try:
+            if not authorize_oracle(w3, contract, oracle_address):
+                logger.error("Failed to authorize oracle")
+                return 1
+        except Exception as e:
+            logger.error(f"Error during oracle authorization: {e}")
+            return 1
         
         # Create verifier
         verifier = NewsVerifier(w3, contract)

@@ -2,7 +2,7 @@
 
 // Contract ABI - This would be generated from your compiled Vyper contract
 let contractABI = []; // Include actual ABI here after compilation
-const contractAddress = "0x83d98bb0a795AD2e765c2323c944011826d63Dc5"; // Deploy the contract and include its address here
+const contractAddress = "0x89a6e163b23548ba7e7fa736bbedf580d1be83ae"; // Deploy the contract and include its address here
 
 // Global variables
 let web3;
@@ -324,8 +324,10 @@ async function createPrediction(event) {
         // Format prediction text
         const predictionText = `${title}: ${details}`;
         
+        console.log(expiryDateStr)
         // Convert expiry date to timestamp
         const expiryDate = new Date(expiryDateStr);
+        console.log(expiryDate)
         expiryDate.setHours(23, 59, 59, 999); // End of day
         const expiryTimestamp = Math.floor(expiryDate.getTime() / 1000);
         

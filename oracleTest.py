@@ -20,7 +20,7 @@ CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS')
 ORACLE_PRIVATE_KEY = os.getenv('OWNER_PRIVATE_KEY')
 WEB3_PROVIDER_URL = os.getenv('WEB3_PROVIDER_URL')
 NEWS_API_KEY = os.getenv('NEWS_API_KEY')
-VERIFICATION_THRESHOLD = float(os.getenv('VERIFICATION_THRESHOLD', '0.75'))  # Similarity threshold
+VERIFICATION_THRESHOLD = float(os.getenv('VERIFICATION_THRESHOLD', '0.55'))  # Similarity threshold
 
 # Initialize Web3
 w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER_URL))

@@ -1,6 +1,6 @@
 
 ## How To Use
-Submit Prediction by filling out all prompts, include all possible keywords to increase your chances at getting the prompt correct! For demonstration, the time set for expiry is set to be valid within 2 minutes, so if you want a quick prediction result set your current date to today. Put your stake in (min 0.01 ETH)m and submit your prediction. Wait a while until the transaction goes through and the contract receives your stake (there will be a confirmation prompt). Wait until your prediction displays as "Pending Verification" to run oracleTest.py to verify the news prediction. Refersh your website to claim your rewards if you got the prediction correct. 
+Submit Prediction by filling out all prompts, include all possible keywords to increase your chances at getting the prompt correct! For demonstration, the time set for expiry is set to be valid within 2 minutes, so if you want a quick prediction result set your current date to today. Put your stake in (min 0.01 ETH) and submit your prediction. Wait a while until the transaction goes through and the contract receives your stake (there will be a confirmation prompt). Wait until your prediction displays as "Pending Verification" to run oracleTest.py to verify the news prediction. Refersh your website to claim your rewards if you got the prediction correct. 
 
 ## app.js
 ### Initialization and Setup

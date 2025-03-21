@@ -378,12 +378,13 @@ async function createPrediction(event) {
         const expiryDate = new Date(`${expiryDateStr}T00:00:00Z`); // Note the 'Z' to specify UTC
         console.log("expiryDate before hour set:", expiryDate.toISOString())
         
-        // Set to current UTC time plus 2 minutes
+        // CHANGE THIS TO END OF DAY INSTEAD FOR FULL EXPERIENCE (Set to current UTC time plus 2 minutes)
         const now = new Date();
         expiryDate.setUTCHours(now.getUTCHours());
         expiryDate.setUTCMinutes(now.getUTCMinutes() + 1);
         expiryDate.setUTCSeconds(now.getUTCSeconds());
         expiryDate.setUTCMilliseconds(now.getUTCMilliseconds());
+
         
         console.log("expiryDate after time set:", expiryDate.toISOString())
         const expiryTimestamp = Math.floor(expiryDate.getTime() / 1000);
